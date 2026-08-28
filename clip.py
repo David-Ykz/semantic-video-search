@@ -19,12 +19,16 @@ def _load_model():
         _tokenizer = open_clip.get_tokenizer(_MODEL_NAME)
     return _model, _preprocess, _tokenizer
 
-def embed_image(image: Image.Image) -> torch.Tensor:
+def embed_images(images: list[Image.Image]) -> torch.Tensor:
     model, preprocess, _ = _load_model()
-    image_input = preprocess(image).unsqueeze(0)
+    batch = torch.stack([preprocess(image) for image in images])
     with torch.no_grad():
-        embedding = model.encode_image(image_input)
-    return embedding.squeeze(0)
+        embeddings = model.encode_image(batch)
+    return embeddings
+
+
+def embed_image(image: Image.Image) -> torch.Tensor:
+    return embed_images([image])[0]
 
 
 def embed_text(query: str) -> torch.Tensor:
@@ -35,9 +39,15 @@ def embed_text(query: str) -> torch.Tensor:
     return embedding.squeeze(0)
 
 
+def cosine_similarity_scores(
+    image_embeddings: torch.Tensor, text_embedding: torch.Tensor
+) -> torch.Tensor:
+    return torch.nn.functional.cosine_similarity(
+        image_embeddings, text_embedding.unsqueeze(0)
+    )
+
+
 def cosine_similarity(image: Image.Image, query: str) -> float:
     image_embedding = embed_image(image)
     text_embedding = embed_text(query)
-    return torch.nn.functional.cosine_similarity(
-        image_embedding.unsqueeze(0), text_embedding.unsqueeze(0)
-    ).item()
+    return cosine_similarity_scores(image_embedding.unsqueeze(0), text_embedding).item()

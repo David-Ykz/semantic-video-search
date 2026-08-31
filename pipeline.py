@@ -6,10 +6,15 @@ import torch
 from PIL import Image
 
 from clip import cosine_similarity_scores, embed_images, embed_text
+from jepa import compute_prediction_error
 
 DEFAULT_SAMPLING_INTERVAL = 2
-DEFAULT_BATCH_SIZE = 16
-DEFAULT_THRESHOLD = 0.25
+CLIP_BATCH_SIZE = 16
+CLIP_SIMILARITY_THRESHOLD = 0.25
+TARGET_INTERVAL_WIDTH = 2.0
+CONTEXT_INTERVAL_WIDTH = 2.0
+JEPA_ERROR_THRESHOLD = 0.5
+
 END_OF_VIDEO = object()
 
 def sample_frames(video_path: str, sampling_interval: float = DEFAULT_SAMPLING_INTERVAL):
@@ -54,7 +59,7 @@ def _batched(iterable, size):
 def embed_video(
     video_path: str,
     sampling_interval: float = DEFAULT_SAMPLING_INTERVAL,
-    batch_size: int = DEFAULT_BATCH_SIZE,
+    batch_size: int = CLIP_BATCH_SIZE,
 ):
     frame_batches: queue.Queue = queue.Queue(maxsize=4)
 
@@ -84,22 +89,68 @@ def embed_video(
 
     return timestamps, torch.cat(embedding_batches, dim=0)
 
-def score_query(timestamps: list[float], embeddings: torch.Tensor, query: str):
+def score_query_similarity(timestamps: list[float], embeddings: torch.Tensor, query: str):
     text_embedding = embed_text(query)
     scores = cosine_similarity_scores(embeddings, text_embedding)
     return list(zip(timestamps, scores.tolist()))
 
-def matches_above_threshold(scored: list[tuple[float, float]], threshold: float):
+def filter_clip_scores(scored: list[tuple[float, float]], threshold: float):
     return [(timestamp, score) for timestamp, score in scored if score >= threshold]
+
+def score_coherence(
+    video_path: str,
+    timestamp: float,
+    target_width: float = TARGET_INTERVAL_WIDTH,
+    context_width: float = CONTEXT_INTERVAL_WIDTH,
+) -> float:
+    cap = cv2.VideoCapture(video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+
+    window_start = timestamp - target_width / 2 - context_width
+    window_end = timestamp + target_width / 2 + context_width
+
+    cap.set(cv2.CAP_PROP_POS_FRAMES, round(window_start * fps))
+    num_frames = round((window_end - window_start) * fps)
+    frames = []
+    for _ in range(num_frames):
+        ok, frame = cap.read()
+        if not ok:
+            break
+        frames.append(Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)))
+    cap.release()
+
+    target_start_frame = round(context_width * fps)
+    target_end_frame = target_start_frame + round(target_width * fps)
+    return compute_prediction_error(frames, target_start_frame, target_end_frame)
+
+def filter_coherence_scores(
+    video_path: str,
+    matches: list[tuple[float, float]],
+    target_width: float = TARGET_INTERVAL_WIDTH,
+    context_width: float = CONTEXT_INTERVAL_WIDTH,
+    error_threshold: float = JEPA_ERROR_THRESHOLD,
+):
+    scored = [
+        (timestamp, clip_score, score_coherence(video_path, timestamp, target_width, context_width))
+        for timestamp, clip_score in matches
+    ]
+    accepted = [(timestamp, clip_score, error) for timestamp, clip_score, error in scored if error <= error_threshold]
+    return accepted, scored
 
 def search_video(
     video_path: str,
     query: str,
     sampling_interval: float = DEFAULT_SAMPLING_INTERVAL,
-    threshold: float = DEFAULT_THRESHOLD,
-    batch_size: int = DEFAULT_BATCH_SIZE,
+    clip_threshold: float = CLIP_SIMILARITY_THRESHOLD,
+    clip_batch_size: int = CLIP_BATCH_SIZE,
+    target_width: float = TARGET_INTERVAL_WIDTH,
+    context_width: float = CONTEXT_INTERVAL_WIDTH,
+    jepa_error_threshold: float = JEPA_ERROR_THRESHOLD,
 ):
-    timestamps, embeddings = embed_video(video_path, sampling_interval, batch_size)
-    scored = score_query(timestamps, embeddings, query)
-    matches = matches_above_threshold(scored, threshold)
-    return matches, scored, embeddings
+    timestamps, embeddings = embed_video(video_path, sampling_interval, clip_batch_size)
+    scored = score_query_similarity(timestamps, embeddings, query)
+    clip_matches = filter_clip_scores(scored, clip_threshold)
+    matches, coherence_scored = filter_coherence_scores(
+        video_path, clip_matches, target_width, context_width, jepa_error_threshold
+    )
+    return matches, coherence_scored, clip_matches, scored, embeddings

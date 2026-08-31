@@ -19,7 +19,7 @@ def _load_model():
     return _model, _processor
 
 
-def embed_clip(frames: list[Image.Image]) -> torch.Tensor:
+def embed_frames(frames: list[Image.Image]) -> torch.Tensor:
     model, processor = _load_model()
     inputs = processor(frames, return_tensors="pt")
     with torch.no_grad():
@@ -46,11 +46,11 @@ def _patch_indices(model, num_frames: int, start_frame: int, end_frame: int) -> 
     return list(range(group_start * patches_per_group, group_end * patches_per_group))
 
 
-def compute_prediction_error(frames: list[Image.Image], target_start_frame: int, target_end_frame: int) -> float:    
+def compute_prediction_error(frames: list[Image.Image], target_start_frame: int, target_end_frame: int) -> float:
     """
     Mask out the frames in the sampled interval, and predict its embedding via the window around the interval
     Return the cosine error between the predicted embedding and the entire interval
-    A low prediction error implies continuity/coherence in the interval 
+    A low prediction error implies continuity/coherence in the interval
     """
     model, processor = _load_model()
     inputs = processor(frames, return_tensors="pt")

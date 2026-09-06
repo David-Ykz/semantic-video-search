@@ -2,8 +2,10 @@ import open_clip
 import torch
 from PIL import Image
 
-_MODEL_NAME = "ViT-B-32-quickgelu"
-_PRETRAINED = "openai"
+_MODEL_NAME = "ViT-B-32"
+_PRETRAINED = "laion2b_s34b_b79k"
+
+_TEXT_TEMPLATE = "a photo of {query}."
 
 _model = None
 _preprocess = None
@@ -33,7 +35,7 @@ def embed_image(image: Image.Image) -> torch.Tensor:
 
 def embed_text(query: str) -> torch.Tensor:
     model, _, tokenizer = _load_model()
-    text_input = tokenizer([query])
+    text_input = tokenizer([_TEXT_TEMPLATE.format(query=query)])
     with torch.no_grad():
         embedding = model.encode_text(text_input)
     return embedding.squeeze(0)

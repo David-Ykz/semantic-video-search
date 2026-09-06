@@ -1,4 +1,5 @@
 import queue
+import statistics
 import threading
 
 import cv2
@@ -6,14 +7,12 @@ import torch
 from PIL import Image
 
 from clip import cosine_similarity_scores, embed_images, embed_text
-from jepa import compute_prediction_error
 
 DEFAULT_SAMPLING_INTERVAL = 2
 CLIP_BATCH_SIZE = 16
-CLIP_SIMILARITY_THRESHOLD = 0.25
-TARGET_INTERVAL_WIDTH = 2.0
-CONTEXT_INTERVAL_WIDTH = 2.0
-JEPA_ERROR_THRESHOLD = 0.5
+
+MIN_CLIP_SIMILARITY_THRESHOLD = 0.22
+CLIP_THRESHOLD_STDDEV_MULTIPLIER = 2.0
 
 END_OF_VIDEO = object()
 
@@ -97,60 +96,26 @@ def score_query_similarity(timestamps: list[float], embeddings: torch.Tensor, qu
 def filter_clip_scores(scored: list[tuple[float, float]], threshold: float):
     return [(timestamp, score) for timestamp, score in scored if score >= threshold]
 
-def score_coherence(
-    video_path: str,
-    timestamp: float,
-    target_width: float = TARGET_INTERVAL_WIDTH,
-    context_width: float = CONTEXT_INTERVAL_WIDTH,
+# Use a dynamic threshold based on the distribution of similarity scores for a video
+def compute_similarity_threshold(
+    scores: list[float],
+    stddev_multiplier: float = CLIP_THRESHOLD_STDDEV_MULTIPLIER,
+    min_threshold: float = MIN_CLIP_SIMILARITY_THRESHOLD,
 ) -> float:
-    cap = cv2.VideoCapture(video_path)
-    fps = cap.get(cv2.CAP_PROP_FPS)
-
-    window_start = timestamp - target_width / 2 - context_width
-    window_end = timestamp + target_width / 2 + context_width
-
-    cap.set(cv2.CAP_PROP_POS_FRAMES, round(window_start * fps))
-    num_frames = round((window_end - window_start) * fps)
-    frames = []
-    for _ in range(num_frames):
-        ok, frame = cap.read()
-        if not ok:
-            break
-        frames.append(Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)))
-    cap.release()
-
-    target_start_frame = round(context_width * fps)
-    target_end_frame = target_start_frame + round(target_width * fps)
-    return compute_prediction_error(frames, target_start_frame, target_end_frame)
-
-def filter_coherence_scores(
-    video_path: str,
-    matches: list[tuple[float, float]],
-    target_width: float = TARGET_INTERVAL_WIDTH,
-    context_width: float = CONTEXT_INTERVAL_WIDTH,
-    error_threshold: float = JEPA_ERROR_THRESHOLD,
-):
-    scored = [
-        (timestamp, clip_score, score_coherence(video_path, timestamp, target_width, context_width))
-        for timestamp, clip_score in matches
-    ]
-    accepted = [(timestamp, clip_score, error) for timestamp, clip_score, error in scored if error <= error_threshold]
-    return accepted, scored
+    mean = statistics.fmean(scores)
+    stdev = statistics.pstdev(scores)
+    return max(min_threshold, mean + stddev_multiplier * stdev)
 
 def search_video(
     video_path: str,
     query: str,
     sampling_interval: float = DEFAULT_SAMPLING_INTERVAL,
-    clip_threshold: float = CLIP_SIMILARITY_THRESHOLD,
     clip_batch_size: int = CLIP_BATCH_SIZE,
-    target_width: float = TARGET_INTERVAL_WIDTH,
-    context_width: float = CONTEXT_INTERVAL_WIDTH,
-    jepa_error_threshold: float = JEPA_ERROR_THRESHOLD,
+    stddev_multiplier: float = CLIP_THRESHOLD_STDDEV_MULTIPLIER,
+    min_threshold: float = MIN_CLIP_SIMILARITY_THRESHOLD,
 ):
     timestamps, embeddings = embed_video(video_path, sampling_interval, clip_batch_size)
     scored = score_query_similarity(timestamps, embeddings, query)
-    clip_matches = filter_clip_scores(scored, clip_threshold)
-    matches, coherence_scored = filter_coherence_scores(
-        video_path, clip_matches, target_width, context_width, jepa_error_threshold
-    )
-    return matches, coherence_scored, clip_matches, scored, embeddings
+    threshold = compute_similarity_threshold([score for _, score in scored], stddev_multiplier, min_threshold)
+    matches = filter_clip_scores(scored, threshold)
+    return matches, threshold, scored, embeddings
